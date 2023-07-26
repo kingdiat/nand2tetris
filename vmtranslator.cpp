@@ -1,7 +1,7 @@
 #include <iostream>
 #include <vector>
 #include <fstream>
-#include <string>
+#include <cxxabi.h>
 #include <string.h>
 #include <map>
 #include <list>
@@ -48,100 +48,121 @@ class Common {
 
 class Command {
     public:
-    int line_number = 0; string comm_name = "";
-    string code = "";
-    static map<int, Command> allCommand;
+    int line_number{}; string comm_name{}, code{};
+    string label_name{};
+
+    static map<int, Command*> allCommand;
+    static bool isLabelExists(string lname) {
+        for (auto it = allCommand.begin(); it != allCommand.end(); it++) {
+            if (it->second->label_name == lname) return true;
+        }
+        return false;
+    }
+    static Command* searchLabel(string label) {
+        for (auto it = allCommand.begin(); it != allCommand.end(); it++) {
+            if (it->second->label_name == label) return it->second;
+        }
+        return nullptr;
+    }
+    static Command* findLastFunc() {
+        for (auto it = allCommand.rbegin(); it != allCommand.rend(); it++) {
+            Command* com = it->second;
+            if (com->comm_name == "func") {
+                return com;
+            }
+        }
+        return nullptr;
+    }
     Command(int line_number, string comm_name, string code) {
         this->line_number = line_number;
         this->comm_name = comm_name;
-        this->code = code;   //因為0是技巧安排用，非真正解析出來的
-        if (line_number != 0) allCommand.insert({line_number, *this});
+        this->code = code;
+        allCommand.insert({line_number, this});
     }
+
+    Command(int line_number, string comm_name, string code, string label):
+                                        Command(line_number, comm_name, code) {
+        this->label_name = label;
+    }
+
     string info() {
         return to_string(line_number) + " " + comm_name + " " + code;
     }
     void writeCode() {
         cout << code << endl;
     }
+
 };
-map<int, Command> Command::allCommand = { };
+map<int, Command*> Command::allCommand = { };
 
 class Label: public Command {
     public:
-    string label_name = "";
-    static map<int, Label> labels;
-    static int count() {
-        return labels.size();
-    }
-    static bool isExists(string lname) {
-        for (auto it = labels.begin(); it != labels.end(); it++) {
-            if (it->second.label_name == lname) return true;
-        }
-        return false;
-    }
-
-    Label(int line, string comm_name, string lname, string code): Command(line, comm_name, code) {
-        if (isExists(lname)) {  //因為Command constructor執行就加入來矣，
-            cout << "line " << line << " label duplicated." << endl;
-            Command::allCommand.erase(this->line_number); //判斷的時袂赴了，刣掉
-        }
-        else { this->label_name = lname; labels.insert({line, *this}); }
+    Label(int line, string comm_name, string code, string lname):
+                                      Command(line, comm_name, code, lname) {
     }
 };
-map<int, Label> Label::labels = {};
+
+class Goto: public Command {
+    public:
+    Goto(int line, string comm_name, string code, string lname):
+                                     Command(line, comm_name, code, lname) {
+        if (lname == "two-pass") {
+            // do nothing , code is altered by second pass's argument
+        }
+        else this->code = "@" + lname + "\n0;JMP\n";  //first pass 修改 code
+    }
+};
+
+class IfGoto: public Command {
+    public:
+    IfGoto(int line, string comm_name, string code, string lname):
+                                     Command(line, comm_name, code, lname) {
+        if (lname == "two-pass") { } // do nothing , code is as argument tokens[1]
+        else this->code = "@SP\nA=M-1\nD=M\n@SP\nM=M-1\n@" + lname + "\nD;JMP\n";  //修改 code
+    }
+};
 
 class Func: public Command {
     public:
-    Label *p_label;
-    string func_name = "";
-    static map<int, Func> funcs;
-
-    Func(int line, string comm_name, string lname, string code): Command(line, comm_name, code) {
-    //Func(int line, string comm_name, string lname, string code) {
-        if (Label::isExists(lname)) {
-            cout << lname << " 已定義。" << endl;
-        }
-        else {         //下跤這逝若無 new 關鍵字，後續執行竟segment fault。
-            p_label = new Label(line, comm_name, lname, code);
-            func_name = comm_name + "_" + lname;
-            funcs.insert({line, *this}); //另外記錄 func_name
-            //cout << "func info: " << label->info() << " - " << decltype(label) << endl;
-        }
+    string ret_code = "";
+    Func(int line, string comm_name, string code, string fname):
+                                            Command(line, comm_name, code, fname) {
     }
 };
-map<int, Func> Func::funcs = {};
 
-class Return: public Func {
+class Return: public Command {
     public:
-    Func *parent = nullptr;
-
+    int parent_line = 0;
+    Return(int line, string comm_name, string code, string label):
+                                       Command(line, comm_name, code, label) {
+        this->code = code + "(RETURN_" + to_string(line) + ")\n"; //label for return
+    }
 };
 
 class Call: public Command {
     public:
-    string fname = "";
-    static map<int, Call> calls;
-
-    Call(int line, string comm_name, string fname, string code): Command(line, comm_name, code) {
-        this->fname = fname;
-        //this->code = "call code is fixed.";
-        calls.insert({line, *this});
+    static string KeepEnviron;
+    Call(int line, string comm_name, string code, string fname):
+                                     Command(line, comm_name, code, fname) {
+        if (fname == "two-pass") { }     //goto code below
+        else this->code = "@LABEL_" + to_string(line) + "\n" + code + "(LABEL_"
+                          + to_string(line) + ")\n";
     }
 };
-map<int, Call> Call::calls = {};
+string Call::KeepEnviron =
+                           string("@SP\nA=M\nM=A\n@SP\nM=M+1\n@LCL\nD=M\n@SP\nA=M\n")
+                           + string("M=D\n@SP\nM=M+1\n@ARGS\nD=M\n@SP\nA=M\nM=D\n@SP\n")
+                           + string("M=M+1\n@THIS\nD=M\n@SP\nA=M\nM=D\n@SP\nM=M+1\n")
+                           + string("@THAT\nD=M\n@SP\nA=M\nM=D\n@SP\nM=M+1\n");
 
 class NoArg: public Command {
     public:
-    string comm_name = "";
     static map<string, string> Comm;
-    static map<int, string> commands;
     NoArg(int line, string comm_name, string code): Command(line, comm_name, code) {
-        this->comm_name = comm_name;
-        //this->code = code;
-        commands.insert({line, comm_name});
-    }
-    void writeCode() {
-        cout << Comm[comm_name];
+        size_t pos;  //無參數命令 若有label 改作行號
+        while ((pos = this->code.find("END")) != string::npos) {
+            this->code = this->code.replace(pos, 3, "LABEL_"+ to_string(line));
+        }
     }
 };
 map<string, string>NoArg::Comm = {
@@ -151,24 +172,20 @@ map<string, string>NoArg::Comm = {
     {"eq" , "@SP\nA=M-1\nD=M\nA=A-1\nD=M-D\n@SP\nM=M-1\nA=M\nA=A-1\nM=-1\n@END\nD;JEQ\n@SP\nA=M-1\nM=0\n(END)" },
     {"gt" , "@SP\nA=M-1\nD=M\nA=A-1\nD=M-D\n@SP\nM=M-1\nA=M\nA=A-1\nM=-1\n@END\nD;JGT\n@SP\nA=M-1\nM=0\n(END)" },
     {"lt" , "@SP\nA=M-1\nD=M\nA=A-1\nD=M-D\n@SP\nM=M-1\nA=M\nA=A-1\nM=-1\n@END\nD;JLT\n@SP\nA=M-1\nM=0\n(END)" },
-    {"return", "func end." },
     {"end", "end of program." },
 };
-map<int, string>NoArg::commands = {};
 
 class Push: public Command {
     public:
-    string sub_comm = "";
-    static map<string, string> sub_command;
-    Push(int line, string comm_name, string sub_comm, string code): Command(line, comm_name, code) {
-        if (sub_command.find(sub_comm) != sub_command.end()) {
-            this->sub_comm = sub_comm;
-            //this->code = Push::sub_command[sub_comm];
-        }
-        else { cout << "line " << this->line_number << " has error!"; }
+    static map<string, string> SubCommand;
+    Push(int line, string comm_name, string code, string sub_comm):
+                                     Command(line, comm_name, code, sub_comm) {
+        //處理傳入來的數值，修改欲輸出的 code
+        string out_code = "@" + code + "\n" + SubCommand[sub_comm];
+        this->code = out_code;
     }
 };
-map<string, string> Push::sub_command = {
+map<string, string> Push::SubCommand = {
         {"constant", "D=A\n@SP\nA=M\nM=D\n@SP\nM=M+1\n"},
         {"local",    "D=A\n@LCL\nA=M+D\nD=M\n@SP\nA=M\nM=D\n@SP\nM=M+1\n"},
         {"argument", "D=A\n@ARG\nA=M+D\nD=M\n@SP\nA=M\nM=D\n@SP\nM=M+1\n"},
@@ -180,52 +197,99 @@ map<string, string> Push::sub_command = {
 
 class Pop: public Command {
     public:
-    string sub_comm = "";
-
-    static map<string, string> sub_command;
-    Pop(int line, string comm_name, string sub_comm, string code): Command(line, comm_name, code) {
-        if (sub_command.find(sub_comm) != sub_command.end()) {
-            this->sub_comm = sub_comm;
-            //this->code = Pop::sub_command[sub_comm];
-        }
-        else { cout << "line " << this->line_number << " has error!"; }
+    static map<string, string> SubCommand;
+    Pop(int line, string comm_name, string code, string sub_comm):
+                                           Command(line, comm_name, code, sub_comm) {
     }
 };
-map<string, string> Pop::sub_command = {
+map<string, string> Pop::SubCommand = {
     {"local", "D=A\n@LCL\nD=M+D\n@SP\nA=M\nM=D\n@SP\nM=M-1\nA=M\nD=M\n@SP\nA=M+1\nA=M\nM=D\n"},
     {"static", "@5\nD=A\n@256\nD=A+D\n@SP\nA=M\nM=D\n@SP\nM=M-1\nA=M\nD=M\n@SP\nA=M+1\nA=M\nM=D\n"},
 };
 
 void parse(int line, vector<string> tokens) {
     int args = tokens.size() - 1;
-    Command command(0, "", "");// = Command(0, "", ""); //變數宣告公家用，初值 0
-
+    Command *command = nullptr;
     if (tokens[0] == "label" && args == 1) {
-        string code = "(" + tokens[1] + ")";
-        command = Label(line, tokens[0], tokens[1], code);
+        string code = "(" + tokens[1] + ")"; //輸出碼叫做 code
+        if (Command::isLabelExists(tokens[1])) {
+            cout << "line " << line << " label exists." << endl;
+        }
+        else {
+            command = new Label(line, tokens[0], code, tokens[1]);
+        }
     }
     else if (tokens[0] == "func" && args == 1) {
-        string code = "(" + tokens[1] + ")";
-        command = Func(line, tokens[0], tokens[1], code);
+        if (Command::isLabelExists(tokens[1])) {
+            cout << "line " << line << " func has label defined." << endl;
+        }
+        else {
+            string code = "(" + tokens[1] + ")";
+            command = new Func(line, tokens[0], code, tokens[1]);
+        }
+    }
+    else if (tokens[0] == "return" && args == 0) {
+        //Command* func = Command::findLastFunc();
+        Command* func = Command::findLastFunc();
+        if (func != nullptr) {     //借用關連 func 的 func name : label_name
+            command = new Return(line, tokens[0], "@6\nD=A\n@SP\nA=M\nA=A-D\nA=M\n0;JMP\n", func->label_name);
+            func->code = "@RETURN_" + to_string(line) + "\n0;JMP\n" + func->code;
+
+        }
+        else  cout << "line " << line << " has no func defined" << endl;
     }
     else if (tokens[0] == "call" && args == 1) {
-        if (!Label::isExists(tokens[1]))
-            cout << "line " << line << " no such func def." << endl;
-        else command = Call(line, tokens[0], tokens[1], "call code temperate.");
+        if (!Command::isLabelExists(tokens[1])) {  //新定義的label
+            command = new Call(line, tokens[0], tokens[1], "two-pass");
+        }    //label 無存在，留予 second pass 處理
+        else {
+            Command* func = Command::searchLabel("tokens[1]");
+            if (func != nullptr && func->comm_name == "func")  //func 可能是 nullptr
+                command = new Call(line, tokens[0], Call::KeepEnviron + "@" + tokens[1] + "\n0;JMP\n", tokens[1]);
+            else cout << "no such func exists." << endl;
+        }
     }
     else if (NoArg::Comm.find(tokens[0]) != NoArg::Comm.end() && args == 0) {
-        command = NoArg(line, tokens[0], NoArg::Comm[tokens[0]]);
+        command = new NoArg(line, tokens[0], NoArg::Comm[tokens[0]]);
     }
-    else if (tokens[0] == "push" && args == 2) {
-        command = Push(line, tokens[0], tokens[1], Push::sub_command[tokens[1]]);
+    else if (tokens[0] == "push" && args == 2) {  //subcommand exists
+        if (Push::SubCommand.find(tokens[1]) != Push::SubCommand.end()) {
+            int n = stoi(tokens[2]);
+            assert(n >= 0);
+            command = new Push(line, tokens[0], tokens[2], tokens[1]);
+        }
+        else { cout << "line " << line << " push has error!"; }  //subcommand not exists
     }
     else if (tokens[0] == "pop" && args == 2) {
-        command = Pop(line, tokens[0], tokens[1], Pop::sub_command[tokens[1]]);
+        if (Pop::SubCommand.find(tokens[1]) != Pop::SubCommand.end()) {
+            command = new Pop(line, tokens[0], Pop::SubCommand[tokens[1]], tokens[1]);
+        }
+        else { cout << "line " << line << " has error!"; }
+    }
+    else if (tokens[0] == "goto" && args == 1) {
+        if (Command::isLabelExists(tokens[1])) {
+            command = new Goto(line, tokens[0], tokens[1], tokens[1]);
+        }
+        else {
+            // "two pass" laebl 暫存佇 code
+            command = new Goto(line, tokens[0], tokens[1], "two-pass");
+        }
+    }
+    else if (tokens[0] == "if-goto" && args == 1) {
+        if (Command::isLabelExists(tokens[1])) {
+            command = new Goto(line, tokens[0], tokens[1], tokens[1]);
+        }
+        else {
+            // "two pass" laebl 暫存佇 code
+            command = new Goto(line, tokens[0], tokens[1], "two-pass");
+        }
+    }
+    else if (tokens[0] == "end" && args == 0) {
+        cout << "Program end at this line" << endl;
     }
     else {
         cout << "line " << line << " has errors." << endl;
     }
-    command.writeCode();
 }
 
 int main(int argc, char* argv[]) {
@@ -255,7 +319,6 @@ int main(int argc, char* argv[]) {
     for (iter = lines.begin(); iter != lines.end(); ++iter) {
         vector<string> tokens = iter->second;  //all tokens of single line
         if (std::find(command.begin(), command.end(), tokens[0]) != command.end()) {
-            //map<string, string> com = comm[tokens[0]];//解析出命令是佗一个
             parse((*iter).first, tokens);
         }
         else {
@@ -265,11 +328,54 @@ int main(int argc, char* argv[]) {
         cout << endl;
     }
 
-cout << "Label: " << Label::labels.size() << " Func: " << Func::funcs.size() << endl;
-cout << "Command count: " << Command::allCommand.size() << endl;
-for (map<int, Command>::iterator it = Command::allCommand.begin(); it!=Command::allCommand.end(); it++) {
-    Command com = it->second;
-    cout << com.line_number << " - " << com.comm_name << " - " << com.code << endl;
+cout << "============================================" << endl;
+for (map<int, Command*>::iterator it = Command::allCommand.begin(); it!=Command::allCommand.end(); it++) {
+        Command* com = it->second;
+        cout << com->line_number << " : comm: " << com->comm_name
+             << " code: " << com->code << " label: " << com->label_name << endl;
 }
+
+
+//second pass
+    for (map<int, Command*>::iterator it = Command::allCommand.begin(); it!=Command::allCommand.end(); it++) {
+        Command* com = it->second;
+        if (com->label_name == "two-pass") {
+            if (com->comm_name == "goto") {
+                com->label_name = com->code;
+                com->code = "@" + com->code + "\n0;JMP\n";
+            }
+            if (com->comm_name == "if-goto") {
+                com->label_name = com->code;
+                com->code = "@SP\nA=M-1\nD=M\n@SP\nM=M-1\n@" + com->code + "\nD;JMP\n";
+            }
+            if (com->comm_name == "call") {  //code is label_name
+                Command* touch = Command::searchLabel(com->code);
+                //nullptr 是揣無 label， func 是有label 毋是 func label
+                if (touch == nullptr || touch->comm_name != "func") {
+                    cout << "line " << com->line_number;
+                    cout << " no such func name be called" << endl;
+                }
+                else {
+                    com->label_name = com->code;
+                    com->code = "@LABEL_" + to_string(com->line_number) + "\n"
+                                + "D=A\n@SP\nA=M\nM=D\n@SP\nM=M+1\n" // push return address
+                                + Call::KeepEnviron
+                                + "@" + com->code + "\n0;JMP\n"
+                                + "(LABEL_" + to_string(com->line_number) + ")\n";
+                }
+            }
+        }
+    }
+//===================================================================================
+cout << "============================================" << endl;
+for (map<int, Command*>::iterator it = Command::allCommand.begin(); it!=Command::allCommand.end(); it++) {
+    Command* com = it->second;
+    //cout << com->line_number << " : comm_name: " << com->comm_name
+    //     << " code: " << com->code << " label: " << com->label_name << endl;
+    cout << com->code << endl;
+int status;
+//cout << "real command: " << abi::__cxa_demangle(typeid(com).name(), 0, 0, &status) << endl;
+}
+//==================================================================================
     return 0;
 }
