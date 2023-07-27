@@ -130,30 +130,40 @@ class Func: public Command {
     }
 };
 
-class Return: public Command {
-    public:
-    int parent_line = 0;
-    Return(int line, string comm_name, string code, string label):
-                                       Command(line, comm_name, code, label) {
-        this->code = code + "(RETURN_" + to_string(line) + ")\n"; //label for return
-    }
-};
 
 class Call: public Command {
     public:
     static string KeepEnviron;
     Call(int line, string comm_name, string code, string fname):
                                      Command(line, comm_name, code, fname) {
-        if (fname == "two-pass") { }     //goto code below
-        else this->code = "@LABEL_" + to_string(line) + "\n" + code + "(LABEL_"
-                          + to_string(line) + ")\n";
+        if (fname == "two-pass") { }
+        else {              //reserve return address's code is in argement
+            this->code = code + KeepEnviron + "@" + fname + "\n0;JMP\n"
+                              + "(CALL_" + to_string(line) + ")\n";
+        }
     }
 };
-string Call::KeepEnviron =
-                           string("@SP\nA=M\nM=A\n@SP\nM=M+1\n@LCL\nD=M\n@SP\nA=M\n")
-                           + string("M=D\n@SP\nM=M+1\n@ARGS\nD=M\n@SP\nA=M\nM=D\n@SP\n")
-                           + string("M=M+1\n@THIS\nD=M\n@SP\nA=M\nM=D\n@SP\nM=M+1\n")
-                           + string("@THAT\nD=M\n@SP\nA=M\nM=D\n@SP\nM=M+1\n");
+string Call::KeepEnviron =     //only reserve sp to that
+             string("@SP\nA=M\nM=A\n@SP\nM=M+1\n@LCL\nD=M\n@SP\nA=M\n")
+           + string("M=D\n@SP\nM=M+1\n@ARG\nD=M\n@SP\nA=M\nM=D\n@SP\n")
+           + string("M=M+1\n@THIS\nD=M\n@SP\nA=M\nM=D\n@SP\nM=M+1\n")
+           + string("@THAT\nD=M\n@SP\nA=M\nM=D\n@SP\nM=M+1\n");
+
+class Return: public Command {
+    public:
+    int parent_line = 0;
+    static string RestoreEnviron;
+    Return(int line, string comm_name, string code, string label):
+                                       Command(line, comm_name, code, label) {
+        this->code = RestoreEnviron + "(RETURN_" + to_string(line) + ")\n"; //label for return
+    }
+};
+string Return::RestoreEnviron =
+                string("@SP\nM=M-1\nA=M\nD=M\n@THAT\nM=D\n@SP\nM=M-1\n")
+                + string("A=M\nD=M\n@THIS\nM=D\n@SP\nM=M-1\nA=M\nD=M\n")
+                + string("@ARG\nM=D\n@SP\nM=M-1\nA=M\nD=M\n@LCL\nM=D\n")
+                + string("@SP\nM=M-1\nA=M\nD=M\n@SP\nM=D\n")
+                + string("@SP\nM=M-1\n@SP\nA=M\nD=M\nA=D\n0;JMP\n"); //after call's address
 
 class NoArg: public Command {
     public:
@@ -231,23 +241,24 @@ void parse(int line, vector<string> tokens) {
     else if (tokens[0] == "return" && args == 0) {
         //Command* func = Command::findLastFunc();
         Command* func = Command::findLastFunc();
-        if (func != nullptr) {     //借用關連 func 的 func name : label_name
-            command = new Return(line, tokens[0], "@6\nD=A\n@SP\nA=M\nA=A-D\nA=M\n0;JMP\n", func->label_name);
+        if (func == nullptr) cout << "line " << line << " has no func defined" << endl;
+        else {
+            command = new Return(line, tokens[0], "", func->label_name); //完全交予 new Return
             func->code = "@RETURN_" + to_string(line) + "\n0;JMP\n" + func->code;
-
         }
-        else  cout << "line " << line << " has no func defined" << endl;
     }
     else if (tokens[0] == "call" && args == 1) {
-        if (!Command::isLabelExists(tokens[1])) {  //新定義的label
+        Command* search_comm = Command::searchLabel(tokens[1]); //search label_name
+
+        if (search_comm == nullptr) {  //label 無存在新定義label留予 second pass 處理
             command = new Call(line, tokens[0], tokens[1], "two-pass");
-        }    //label 無存在，留予 second pass 處理
-        else {
-            Command* func = Command::searchLabel("tokens[1]");
-            if (func != nullptr && func->comm_name == "func")  //func 可能是 nullptr
-                command = new Call(line, tokens[0], Call::KeepEnviron + "@" + tokens[1] + "\n0;JMP\n", tokens[1]);
-            else cout << "no such func exists." << endl;
         }
+        else if (search_comm->comm_name == "func") { //本逝處理第一pass
+            string ret_addr = "@CALL_" + to_string(line)
+                                       + "\nD=A\n@SP\nA=M\nM=D\n@SP\nM=M+1\n";
+            command = new Call(line, tokens[0], ret_addr, tokens[1]);
+        }
+        else cout << "no such func exists." << endl;
     }
     else if (NoArg::Comm.find(tokens[0]) != NoArg::Comm.end() && args == 0) {
         command = new NoArg(line, tokens[0], NoArg::Comm[tokens[0]]);
@@ -327,14 +338,14 @@ int main(int argc, char* argv[]) {
         }
         cout << endl;
     }
-
+//--------------------------------------------------------------------------
 cout << "============================================" << endl;
 for (map<int, Command*>::iterator it = Command::allCommand.begin(); it!=Command::allCommand.end(); it++) {
         Command* com = it->second;
         cout << com->line_number << " : comm: " << com->comm_name
-             << " code: " << com->code << " label: " << com->label_name << endl;
+             << " label: " << com->label_name << endl;
 }
-
+//--------------------------------------------------------------------------
 
 //second pass
     for (map<int, Command*>::iterator it = Command::allCommand.begin(); it!=Command::allCommand.end(); it++) {
@@ -357,11 +368,11 @@ for (map<int, Command*>::iterator it = Command::allCommand.begin(); it!=Command:
                 }
                 else {
                     com->label_name = com->code;
-                    com->code = "@LABEL_" + to_string(com->line_number) + "\n"
+                    com->code = "@CALL_" + to_string(com->line_number) + "\n"
                                 + "D=A\n@SP\nA=M\nM=D\n@SP\nM=M+1\n" // push return address
                                 + Call::KeepEnviron
                                 + "@" + com->code + "\n0;JMP\n"
-                                + "(LABEL_" + to_string(com->line_number) + ")\n";
+                                + "(CALL_" + to_string(com->line_number) + ")\n";
                 }
             }
         }
